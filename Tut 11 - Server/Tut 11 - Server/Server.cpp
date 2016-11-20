@@ -1,5 +1,6 @@
 #include "Server.h"
 #include <thread>
+#include <WS2tcpip.h>
 
 Server::Server(int PORT, bool BroadcastPublically) //Port = port to broadcast on. BroadcastPublically = false if server is not open to the public (people outside of your router), true = server is open to everyone (assumes that the port is properly forwarded on router settings)
 {
@@ -46,6 +47,8 @@ bool Server::ListenForNewConnection()
 	}
 	else //If client connection properly accepted
 	{
+		char ipAddress[32] = {};
+		inet_ntop(AF_INET, &addr.sin_addr, ipAddress, sizeof(ipAddress));
 		std::unique_lock<std::shared_mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are adding an element to connection vector
 		std::shared_ptr<Connection> newConnection;
 		if (UnusedConnections > 0) //If there is an unused connection that this client can use
@@ -54,9 +57,11 @@ bool Server::ListenForNewConnection()
 			{
 				if (connections[i]->ActiveConnection == false) //If connection is not active
 				{
-					connections[i]->socket = newConnectionSocket;
-					connections[i]->ActiveConnection = true;
 					newConnection = connections[i];
+					newConnection->socket = newConnectionSocket;
+					newConnection->ActiveConnection = true;
+					newConnection->ipAddress = ipAddress;
+					
 					UnusedConnections -= 1;
 					break;
 				}
@@ -65,10 +70,10 @@ bool Server::ListenForNewConnection()
 		else //If no unused connections available... (add new connection to the socket)
 		{
 			newConnection = std::make_shared<Connection>(newConnectionSocket);
-			newConnection->id = connections.size();
+			newConnection->ipAddress = ipAddress;
 			connections.push_back(newConnection); //push new connection into vector of connections
 		}
-		std::cout << "Client Connected! ID:" << newConnection->id << std::endl;
+		std::cout << "Client Connected! IP:" << newConnection->ipAddress << std::endl;
 		std::thread{ &ClientHandlerThread, newConnection }.detach();
 		return true;
 	}
@@ -103,7 +108,7 @@ bool Server::ProcessPacket(Connection & connection, PacketType _packettype)
 				SendString(*otherConnection, message);
 			}
 		}
-		std::cout << "Processed chat message packet from user ID: " << connection.id << std::endl;
+		std::cout << "Processed chat message packet from user IP: " << connection.ipAddress << std::endl;
 		break;
 	}
 	case PacketType::FileTransferRequestFile:
@@ -115,7 +120,7 @@ bool Server::ProcessPacket(Connection & connection, PacketType _packettype)
 		connection.file.infileStream.open(FileName, std::ios::binary | std::ios::ate); //Open file to read in binary | ate mode. We use ate so we can use tellg to get file size. We use binary because we need to read bytes as raw data
 		if (!connection.file.infileStream.is_open()) //If file is not open? (Error opening file?)
 		{
-			std::cout << "Client: " << connection.id << " requested file: " << FileName << ", but that file does not exist." << std::endl;
+			std::cout << "Client: " << connection.ipAddress << " requested file: " << FileName << ", but that file does not exist." << std::endl;
 			std::string ErrMsg = "Requested file: " + FileName + " does not exist or was not found.";
 			SendString(connection, ErrMsg); //Send error msg string to client
 			return true;
@@ -193,7 +198,7 @@ void Server::ClientHandlerThread(std::shared_ptr<Connection> connection)
 		if (!serverptr->ProcessPacket(*connection, packettype)) //Process packet (packet type)
 			break; //If there is an issue processing the packet, exit this loop
 	}
-	std::cout << "Lost connection to client ID: " << connection->id << std::endl;
+	std::cout << "Lost connection to client IP: " << connection->ipAddress << std::endl;
 	serverptr->DisconnectClient(*connection); //Disconnect this client and clean up the connection if possible
 	return;
 }

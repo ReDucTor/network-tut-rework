@@ -23,7 +23,7 @@ public:
 	//file transfer data
 	FileTransferData file; //Object that contains information about our file that is being sent to the client from this server
 	PacketManager pm; //Packet Manager for outgoing data for this connection
-	std::size_t id;
+	std::string ipAddress;
 };
 
 class Server
