@@ -22,6 +22,7 @@ public:
 	//file transfer data
 	FileTransferData file; //Object that contains information about our file that is being sent to the client from this server
 	PacketManager pm; //Packet Manager for outgoing data for this connection
+	std::size_t id;
 };
 
 class Server
@@ -32,25 +33,25 @@ public:
 
 private:
 	
-	bool sendall(int ID, char * data, int totalbytes);
-	bool recvall(int ID, char * data, int totalbytes);
+	bool sendall(Connection & connection, char * data, int totalbytes);
+	bool recvall(Connection & connection, char * data, int totalbytes);
 
-	bool Sendint32_t(int ID, int32_t _int32_t);
-	bool Getint32_t(int ID, int32_t & _int32_t);
+	bool Sendint32_t(Connection & connection, int32_t _int32_t);
+	bool Getint32_t(Connection & connection, int32_t & _int32_t);
 
-	bool SendPacketType(int ID, PacketType _packettype);
-	bool GetPacketType(int ID, PacketType & _packettype);
+	bool SendPacketType(Connection & connection, PacketType _packettype);
+	bool GetPacketType(Connection & connection, PacketType & _packettype);
 
-	void SendString(int ID, std::string & _string);
-	bool GetString(int ID, std::string & _string);
+	void SendString(Connection & connection, std::string & _string);
+	bool GetString(Connection & connection, std::string & _string);
 
-	bool ProcessPacket(int ID, PacketType _packettype);
-	bool HandleSendFile(int ID);
+	bool ProcessPacket(Connection & connection, PacketType _packettype);
+	bool HandleSendFile(Connection & connection);
 
-	static void ClientHandlerThread(int ID);
+	static void ClientHandlerThread(std::shared_ptr<Connection> connection);
 	static void PacketSenderThread();
 	
-	void DisconnectClient(int ID); //Called to properly disconnect and clean up a client (if possible)
+	void DisconnectClient(Connection & connection); //Called to properly disconnect and clean up a client (if possible)
 private:
 	std::vector<std::shared_ptr<Connection>> connections;
 	std::mutex connectionMgr_mutex; //mutex for managing connections (used when a client disconnects)

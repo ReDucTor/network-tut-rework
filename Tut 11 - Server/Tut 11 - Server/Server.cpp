@@ -1,4 +1,5 @@
 #include "Server.h"
+#include <thread>
 
 Server::Server(int PORT, bool BroadcastPublically) //Port = port to broadcast on. BroadcastPublically = false if server is not open to the public (people outside of your router), true = server is open to everyone (assumes that the port is properly forwarded on router settings)
 {
@@ -46,7 +47,7 @@ bool Server::ListenForNewConnection()
 	else //If client connection properly accepted
 	{
 		std::lock_guard<std::mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are adding an element to connection vector
-		int NewConnectionID = connections.size(); //default new connection id to size of connections vector (we will change it if we can reuse an unused connection)
+		std::shared_ptr<Connection> newConnection;
 		if (UnusedConnections > 0) //If there is an unused connection that this client can use
 		{
 			for (size_t i = 0; i < connections.size(); i++) //iterate through the unused connections starting at first connection
@@ -55,7 +56,7 @@ bool Server::ListenForNewConnection()
 				{
 					connections[i]->socket = newConnectionSocket;
 					connections[i]->ActiveConnection = true;
-					NewConnectionID = i;
+					newConnection = connections[i];
 					UnusedConnections -= 1;
 					break;
 				}
@@ -63,64 +64,73 @@ bool Server::ListenForNewConnection()
 		}
 		else //If no unused connections available... (add new connection to the socket)
 		{
-			std::shared_ptr<Connection> newConnection(new Connection(newConnectionSocket));
+			newConnection = std::make_shared<Connection>(newConnectionSocket);
+			newConnection->id = connections.size();
 			connections.push_back(newConnection); //push new connection into vector of connections
 		}
-		std::cout << "Client Connected! ID:" << NewConnectionID << std::endl;
-		CreateThread(NULL, NULL, (LPTHREAD_START_ROUTINE)ClientHandlerThread, (LPVOID)(NewConnectionID), NULL, NULL); //Create Thread to handle this client. The index in the socket array for this thread is the value (i).
+		std::cout << "Client Connected! ID:" << newConnection->id << std::endl;
+		std::thread{ &ClientHandlerThread, newConnection }.detach();
 		return true;
 	}
 }
 
-bool Server::ProcessPacket(int ID, PacketType _packettype)
+bool Server::ProcessPacket(Connection & connection, PacketType _packettype)
 {
 	switch (_packettype)
 	{
 	case PacketType::ChatMessage: //Packet Type: chat message
 	{
 		std::string message; //string to store our message we received
-		if (!GetString(ID, message)) //Get the chat message and store it in variable: Message
+		if (!GetString(connection, message)) //Get the chat message and store it in variable: Message
 			return false; //If we do not properly get the chat message, return false
 						  //Next we need to send the message out to each user
 		
-		for (size_t i = 0; i < connections.size(); i++)
+		for (const auto & otherConnection : connections)
 		{
-			if (connections[i]->ActiveConnection == false) //if connection is not active
-				continue; //Skip logic for this connection
-			if (i == ID) //If connection is the user who sent the message...
-				continue;//Skip to the next user since there is no purpose in sending the message back to the user who sent it.
-			SendString(i, message); //send message to connection i
+			// Exclude in-active connections
+			if (!otherConnection->ActiveConnection)
+			{
+				continue;
+			}
+
+			// Exclude this connection
+			if (otherConnection.get() == &connection)
+			{
+				continue;
+			}
+
+			SendString(*otherConnection, message);
 		}
-		std::cout << "Processed chat message packet from user ID: " << ID << std::endl;
+		std::cout << "Processed chat message packet from user ID: " << connection.id << std::endl;
 		break;
 	}
 	case PacketType::FileTransferRequestFile:
 	{
 		std::string FileName; //string to store file name
-		if (!GetString(ID, FileName)) //If issue getting file name
+		if (!GetString(connection, FileName)) //If issue getting file name
 			return false; //Failure to process packet
 
-		connections[ID]->file.infileStream.open(FileName, std::ios::binary | std::ios::ate); //Open file to read in binary | ate mode. We use ate so we can use tellg to get file size. We use binary because we need to read bytes as raw data
-		if (!connections[ID]->file.infileStream.is_open()) //If file is not open? (Error opening file?)
+		connection.file.infileStream.open(FileName, std::ios::binary | std::ios::ate); //Open file to read in binary | ate mode. We use ate so we can use tellg to get file size. We use binary because we need to read bytes as raw data
+		if (!connection.file.infileStream.is_open()) //If file is not open? (Error opening file?)
 		{
-			std::cout << "Client: " << ID << " requested file: " << FileName << ", but that file does not exist." << std::endl;
+			std::cout << "Client: " << connection.id << " requested file: " << FileName << ", but that file does not exist." << std::endl;
 			std::string ErrMsg = "Requested file: " + FileName + " does not exist or was not found.";
-			SendString(ID, ErrMsg); //Send error msg string to client
+			SendString(connection, ErrMsg); //Send error msg string to client
 			return true;
 		}
 
-		connections[ID]->file.fileName = FileName; //set file name just so we can print it out after done transferring
-		connections[ID]->file.fileSize = connections[ID]->file.infileStream.tellg(); //Get file size
-		connections[ID]->file.infileStream.seekg(0); //Set cursor position in file back to offset 0 for when we read file
-		connections[ID]->file.fileOffset = 0; //Update file offset for knowing when we hit end of file
+		connection.file.fileName = FileName; //set file name just so we can print it out after done transferring
+		connection.file.fileSize = connection.file.infileStream.tellg(); //Get file size
+		connection.file.infileStream.seekg(0); //Set cursor position in file back to offset 0 for when we read file
+		connection.file.fileOffset = 0; //Update file offset for knowing when we hit end of file
 		
-		if (!HandleSendFile(ID)) //Attempt to send byte buffer from file. If failure...
+		if (!HandleSendFile(connection)) //Attempt to send byte buffer from file. If failure...
 			return false;
 		break;
 	}
 	case PacketType::FileTransferRequestNextBuffer:
 	{
-		if (!HandleSendFile(ID)) //Attempt to send byte buffer from file. If failure...
+		if (!HandleSendFile(connection)) //Attempt to send byte buffer from file. If failure...
 			return false;
 		break;
 	}
@@ -133,56 +143,56 @@ bool Server::ProcessPacket(int ID, PacketType _packettype)
 	return true;
 }
 
-bool Server::HandleSendFile(int ID)
+bool Server::HandleSendFile(Connection & connection)
 {
-	if (connections[ID]->file.fileOffset >= connections[ID]->file.fileSize) //If end of file reached then return true and skip sending any bytes
+	if (connection.file.fileOffset >= connection.file.fileSize) //If end of file reached then return true and skip sending any bytes
 		return true;
-	if (!SendPacketType(ID, PacketType::FileTransferByteBuffer)) //Send packet type for file transfer byte buffer
+	if (!SendPacketType(connection, PacketType::FileTransferByteBuffer)) //Send packet type for file transfer byte buffer
 		return false;
 	
-	connections[ID]->file.remainingBytes = connections[ID]->file.fileSize - connections[ID]->file.fileOffset; //calculate remaining bytes
-	if (connections[ID]->file.remainingBytes > connections[ID]->file.buffersize) //if remaining bytes > max byte buffer
+	connection.file.remainingBytes = connection.file.fileSize - connection.file.fileOffset; //calculate remaining bytes
+	if (connection.file.remainingBytes > connection.file.buffersize) //if remaining bytes > max byte buffer
 	{
-		connections[ID]->file.infileStream.read(connections[ID]->file.buffer, connections[ID]->file.buffersize); //read in max buffer size bytes
-		if (!Sendint32_t(ID, connections[ID]->file.buffersize)) //send int of buffer size
+		connection.file.infileStream.read(connection.file.buffer, connection.file.buffersize); //read in max buffer size bytes
+		if (!Sendint32_t(connection, connection.file.buffersize)) //send int of buffer size
 			return false;
-		if (!sendall(ID, connections[ID]->file.buffer, connections[ID]->file.buffersize)) //send bytes for buffer
+		if (!sendall(connection, connection.file.buffer, connection.file.buffersize)) //send bytes for buffer
 			return false;
-		connections[ID]->file.fileOffset += connections[ID]->file.buffersize; //increment fileoffset by # of bytes written
+		connection.file.fileOffset += connection.file.buffersize; //increment fileoffset by # of bytes written
 	}
 	else
 	{
-		connections[ID]->file.infileStream.read(connections[ID]->file.buffer, connections[ID]->file.remainingBytes); //read in remaining bytes
-		if (!Sendint32_t(ID, connections[ID]->file.remainingBytes)) //send int of buffer size
+		connection.file.infileStream.read(connection.file.buffer, connection.file.remainingBytes); //read in remaining bytes
+		if (!Sendint32_t(connection, connection.file.remainingBytes)) //send int of buffer size
 			return false;
-		if (!sendall(ID, connections[ID]->file.buffer, connections[ID]->file.remainingBytes)) //send bytes for buffer
+		if (!sendall(connection, connection.file.buffer, connection.file.remainingBytes)) //send bytes for buffer
 			return false;
-		connections[ID]->file.fileOffset += connections[ID]->file.remainingBytes; //increment fileoffset by # of bytes written
+		connection.file.fileOffset += connection.file.remainingBytes; //increment fileoffset by # of bytes written
 	}
 
-	if (connections[ID]->file.fileOffset == connections[ID]->file.fileSize) //If we are at end of file
+	if (connection.file.fileOffset == connection.file.fileSize) //If we are at end of file
 	{
-		if (!SendPacketType(ID, PacketType::FileTransfer_EndOfFile)) //Send end of file packet
+		if (!SendPacketType(connection, PacketType::FileTransfer_EndOfFile)) //Send end of file packet
 			return false;
 		//Print out data on server details about file that was sent
-		std::cout << std::endl << "File sent: " << connections[ID]->file.fileName << std::endl;
-		std::cout << "File size(bytes): " << connections[ID]->file.fileSize << std::endl << std::endl;
+		std::cout << std::endl << "File sent: " << connection.file.fileName << std::endl;
+		std::cout << "File size(bytes): " << connection.file.fileSize << std::endl << std::endl;
 	}
 	return true;
 }
 
-void Server::ClientHandlerThread(int ID) //ID = the index in the SOCKET connections array
+void Server::ClientHandlerThread(std::shared_ptr<Connection> connection)
 {
 	PacketType packettype;
 	while (true)
 	{
-		if (!serverptr->GetPacketType(ID, packettype)) //Get packet type
+		if (!serverptr->GetPacketType(*connection, packettype)) //Get packet type
 			break; //If there is an issue getting the packet type, exit this loop
-		if (!serverptr->ProcessPacket(ID, packettype)) //Process packet (packet type)
+		if (!serverptr->ProcessPacket(*connection, packettype)) //Process packet (packet type)
 			break; //If there is an issue processing the packet, exit this loop
 	}
-	std::cout << "Lost connection to client ID: " << ID << std::endl;
-	serverptr->DisconnectClient(ID); //Disconnect this client and clean up the connection if possible
+	std::cout << "Lost connection to client ID: " << connection->id << std::endl;
+	serverptr->DisconnectClient(*connection); //Disconnect this client and clean up the connection if possible
 	return;
 }
 
@@ -195,7 +205,7 @@ void Server::PacketSenderThread() //Thread for all outgoing packets
 			if (serverptr->connections[i]->pm.HasPendingPackets()) //If there are pending packets for this connection's packet manager
 			{
 				Packet p = serverptr->connections[i]->pm.Retrieve(); //Retrieve packet from packet manager
-				if (!serverptr->sendall(i, p.buffer, p.size)) //send packet to connection
+				if (!serverptr->sendall(*serverptr->connections[i], p.buffer, p.size)) //send packet to connection
 				{
 					std::cout << "Failed to send packet to ID: " << i << std::endl; //Print out if failed to send packet
 				}
@@ -206,17 +216,17 @@ void Server::PacketSenderThread() //Thread for all outgoing packets
 	}
 }
 
-void Server::DisconnectClient(int ID) //Disconnects a client and cleans up socket if possible
+void Server::DisconnectClient(Connection & connection) //Disconnects a client and cleans up socket if possible
 {
 	std::lock_guard<std::mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are possible removing element(s) from the vector
-	if (connections[ID]->ActiveConnection == false) //If connection has already been disconnected?
+	if (connection.ActiveConnection == false) //If connection has already been disconnected?
 	{
 		return; //return - this should never happen, but just in case...
 	}
-	connections[ID]->pm.Clear(); //Clear out all remaining packets in queue for this connection
-	connections[ID]->ActiveConnection = false; //Update connection's activity status to false since connection is now unused
-	closesocket(connections[ID]->socket); //Close the socket for this connection
-	if (ID == (connections.size() - 1)) //If last connection in vector.... (we can remove it)
+	connection.pm.Clear(); //Clear out all remaining packets in queue for this connection
+	connection.ActiveConnection = false; //Update connection's activity status to false since connection is now unused
+	closesocket(connection.socket); //Close the socket for this connection
+	if (&connection == connections.back().get()) //If last connection in vector.... (we can remove it)
 	{
 		connections.pop_back(); //Erase last connection from vector
 		//After cleaning up that connection, check if there are any more connections that can be erased (only connections at the end of the vector can be erased)
