@@ -49,28 +49,10 @@ bool Server::ListenForNewConnection()
 	{
 		char ipAddress[32] = {};
 		inet_ntop(AF_INET, &addr.sin_addr, ipAddress, sizeof(ipAddress));
-		std::unique_lock<std::shared_mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are adding an element to connection vector
-		std::shared_ptr<Connection> newConnection;
-		if (UnusedConnections > 0) //If there is an unused connection that this client can use
+		std::shared_ptr<Connection> newConnection = std::make_shared<Connection>(newConnectionSocket);
+		newConnection->ipAddress = ipAddress;
 		{
-			for (size_t i = 0; i < connections.size(); i++) //iterate through the unused connections starting at first connection
-			{
-				if (connections[i]->ActiveConnection == false) //If connection is not active
-				{
-					newConnection = connections[i];
-					newConnection->socket = newConnectionSocket;
-					newConnection->ActiveConnection = true;
-					newConnection->ipAddress = ipAddress;
-					
-					UnusedConnections -= 1;
-					break;
-				}
-			}
-		}
-		else //If no unused connections available... (add new connection to the socket)
-		{
-			newConnection = std::make_shared<Connection>(newConnectionSocket);
-			newConnection->ipAddress = ipAddress;
+			std::unique_lock<std::shared_mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are adding an element to connection vector
 			connections.push_back(newConnection); //push new connection into vector of connections
 		}
 		std::cout << "Client Connected! IP:" << newConnection->ipAddress << std::endl;
@@ -226,7 +208,6 @@ void Server::PacketSenderThread() //Thread for all outgoing packets
 
 void Server::DisconnectClient(Connection & connection) //Disconnects a client and cleans up socket if possible
 {
-	std::unique_lock<std::shared_mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are possible removing element(s) from the vector
 	if (connection.ActiveConnection == false) //If connection has already been disconnected?
 	{
 		return; //return - this should never happen, but just in case...
@@ -234,22 +215,8 @@ void Server::DisconnectClient(Connection & connection) //Disconnects a client an
 	connection.pm.Clear(); //Clear out all remaining packets in queue for this connection
 	connection.ActiveConnection = false; //Update connection's activity status to false since connection is now unused
 	closesocket(connection.socket); //Close the socket for this connection
-	if (&connection == connections.back().get()) //If last connection in vector.... (we can remove it)
-	{
-		connections.pop_back(); //Erase last connection from vector
-		//After cleaning up that connection, check if there are any more connections that can be erased (only connections at the end of the vector can be erased)
 
-		for (size_t i = connections.size() - 1; i >= 0 && connections.size()>0; i--)
-		{
-			if (connections[i]->ActiveConnection) //If connection is active we cannot remove any more connections from vector
-				break;
-			//If we have not broke out of the for loop, we can remove the current indexed connection
-			connections.pop_back(); //Erase last connection from vector
-			UnusedConnections -= 1;
-		}
-	}
-	else
-	{
-		UnusedConnections += 1;
-	}
+	std::unique_lock<std::shared_mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are possible removing element(s) from the vector
+	connections.erase(std::find_if(connections.begin(), connections.end(), 
+		[&](auto & otherConnection) { return otherConnection.get() == &connection; } ));
 }

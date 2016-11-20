@@ -56,7 +56,6 @@ private:
 private:
 	std::vector<std::shared_ptr<Connection>> connections;
 	std::shared_mutex connectionMgr_mutex; //mutex for managing connections (used when a client disconnects)
-	int UnusedConnections = 0; //# of Inactive Connection Objects that can be reused
 
 	SOCKADDR_IN addr; //Address that we will bind our listening socket to
 	int addrlen = sizeof(addr);
