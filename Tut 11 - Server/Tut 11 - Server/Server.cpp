@@ -46,7 +46,7 @@ bool Server::ListenForNewConnection()
 	}
 	else //If client connection properly accepted
 	{
-		std::lock_guard<std::mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are adding an element to connection vector
+		std::unique_lock<std::shared_mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are adding an element to connection vector
 		std::shared_ptr<Connection> newConnection;
 		if (UnusedConnections > 0) //If there is an unused connection that this client can use
 		{
@@ -84,22 +84,24 @@ bool Server::ProcessPacket(Connection & connection, PacketType _packettype)
 		if (!GetString(connection, message)) //Get the chat message and store it in variable: Message
 			return false; //If we do not properly get the chat message, return false
 						  //Next we need to send the message out to each user
-		
-		for (const auto & otherConnection : connections)
 		{
-			// Exclude in-active connections
-			if (!otherConnection->ActiveConnection)
+			std::shared_lock<std::shared_mutex> lock{ connectionMgr_mutex };
+			for (const auto & otherConnection : connections)
 			{
-				continue;
-			}
+				// Exclude in-active connections
+				if (!otherConnection->ActiveConnection)
+				{
+					continue;
+				}
 
-			// Exclude this connection
-			if (otherConnection.get() == &connection)
-			{
-				continue;
-			}
+				// Exclude this connection
+				if (otherConnection.get() == &connection)
+				{
+					continue;
+				}
 
-			SendString(*otherConnection, message);
+				SendString(*otherConnection, message);
+			}
 		}
 		std::cout << "Processed chat message packet from user ID: " << connection.id << std::endl;
 		break;
@@ -200,6 +202,7 @@ void Server::PacketSenderThread() //Thread for all outgoing packets
 {
 	while (true)
 	{
+		std::shared_lock< std::shared_mutex > lock{ serverptr->connectionMgr_mutex };
 		for (size_t i = 0; i < serverptr->connections.size(); i++) //for each connection...
 		{
 			if (serverptr->connections[i]->pm.HasPendingPackets()) //If there are pending packets for this connection's packet manager
@@ -218,7 +221,7 @@ void Server::PacketSenderThread() //Thread for all outgoing packets
 
 void Server::DisconnectClient(Connection & connection) //Disconnects a client and cleans up socket if possible
 {
-	std::lock_guard<std::mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are possible removing element(s) from the vector
+	std::unique_lock<std::shared_mutex> lock(connectionMgr_mutex); //Lock connection manager mutex since we are possible removing element(s) from the vector
 	if (connection.ActiveConnection == false) //If connection has already been disconnected?
 	{
 		return; //return - this should never happen, but just in case...

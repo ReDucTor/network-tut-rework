@@ -8,6 +8,7 @@
 #include "PacketManager.h"
 #include "PacketStructs.h"
 #include <vector> //for std::vector
+#include <shared_mutex>
 
 class Connection
 {
@@ -54,7 +55,7 @@ private:
 	void DisconnectClient(Connection & connection); //Called to properly disconnect and clean up a client (if possible)
 private:
 	std::vector<std::shared_ptr<Connection>> connections;
-	std::mutex connectionMgr_mutex; //mutex for managing connections (used when a client disconnects)
+	std::shared_mutex connectionMgr_mutex; //mutex for managing connections (used when a client disconnects)
 	int UnusedConnections = 0; //# of Inactive Connection Objects that can be reused
 
 	SOCKADDR_IN addr; //Address that we will bind our listening socket to
